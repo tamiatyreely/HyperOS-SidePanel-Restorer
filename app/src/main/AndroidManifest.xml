@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="HyperOS SidePanel Restorer">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="HyperOS 4 video toolbox side-swipe compatibility research module (diagnostic build)." />
+        <meta-data android:name="xposedminversion" android:value="82" />
+    </application>
+</manifest>
