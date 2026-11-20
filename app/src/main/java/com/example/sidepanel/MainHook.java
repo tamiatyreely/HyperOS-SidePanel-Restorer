@@ -1,7 +1,10 @@
+
 package com.example.sidepanel;
 
+import dalvik.system.DexFile;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Enumeration;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -11,189 +14,232 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
+/**
+ * HyperOS Native Sidebar Diagnostic
+ * 仅用于诊断，不修改手势、不创建悬浮窗。
+ */
 public final class MainHook implements IXposedHookLoadPackage {
 
-    private static final String TAG = "[SP-TRACE] ";
+    private static final String TAG = "[SP-NATIVE] ";
 
-    private static final Set<String> SEEN =
+    private static final Set<String> HOOKED =
             ConcurrentHashMap.newKeySet();
 
     private static final ConcurrentHashMap<String, AtomicInteger> COUNTS =
             new ConcurrentHashMap<>();
 
-    private static final String[] SERVICE_CLASSES = {
+    private static final String[] IMPORTANT_CLASSES = {
         "com.miui.gamebooster.service.VideoToolBoxService",
         "com.miui.gamebooster.service.GameBoosterService",
-        "com.miui.gamebooster.service.IVideoToolBox"
+        "com.miui.gamebooster.service.DockWindowManagerService",
+        "com.miui.gamebooster.service.DockWindowManagerService$SidebarOverlayBinder"
     };
 
-    private static final String[] KEYWORDS = {
-        "sidebar", "gamebooster", "videotoolbox",
-        "toolbox", "drag", "gesture", "region",
-        "slide", "edge"
+    private static final String[] METHOD_WORDS = {
+        "sidebar",
+        "toolbox",
+        "slidebar",
+        "drag",
+        "region",
+        "dock",
+        "overlay",
+        "show",
+        "move",
+        "line",
+        "tips",
+        "invoke",
+        "gesture"
     };
 
     @Override
     public void handleLoadPackage(
-            XC_LoadPackage.LoadPackageParam lp) {
+            final XC_LoadPackage.LoadPackageParam lp) {
 
-        String pkg = lp.packageName;
-
-        if (!pkg.equals("com.miui.securitycenter")
-                && !pkg.equals("com.android.systemui")
-                && !pkg.equals("miui.systemui.plugin")) {
+        if (!"com.miui.securitycenter".equals(lp.packageName)) {
             return;
         }
 
-        XposedBridge.log(TAG + "LOADED PACKAGE: "
-                + pkg + " PROCESS: " + lp.processName);
+        XposedBridge.log(
+                TAG + "SECURITYCENTER START process=" + lp.processName
+        );
 
-        if (pkg.equals("com.miui.securitycenter")) {
-            scanServices(lp);
+        // 检查重要服务类
+        for (String name : IMPORTANT_CLASSES) {
+            hookNamedClass(lp, name);
         }
 
-        if (pkg.equals("com.android.systemui")
-                || pkg.equals("miui.systemui.plugin")) {
-            traceClassLoading();
+        // 扫描 APK 中的原生侧边栏类
+        scanDexForSidebarClasses(lp);
+    }
+
+    private static void scanDexForSidebarClasses(
+            XC_LoadPackage.LoadPackageParam lp) {
+
+        String apk = lp.appInfo.sourceDir;
+
+        try (DexFile dex = new DexFile(apk)) {
+
+            Enumeration<String> entries = dex.entries();
+
+            int matched = 0;
+
+            while (entries.hasMoreElements()) {
+
+                String name = entries.nextElement();
+
+                if (name.startsWith("com.miui.dock.sidebar.")
+                        || name.startsWith("com.miui.sidebar.")) {
+
+                    matched++;
+
+                    hookNamedClass(lp, name);
+                }
+            }
+
+            XposedBridge.log(
+                    TAG + "SIDEBAR DEX CLASSES=" + matched
+            );
+
+        } catch (Throwable t) {
+
+            XposedBridge.log(
+                    TAG + "DEX SCAN FAILED: " + t
+            );
         }
     }
 
-    private static void traceClassLoading() {
+    private static void hookNamedClass(
+            XC_LoadPackage.LoadPackageParam lp,
+            String name) {
+
+        if (!HOOKED.add(name)) {
+            return;
+        }
+
         try {
-            XposedBridge.hookAllMethods(
-                ClassLoader.class,
-                "loadClass",
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(
-                            MethodHookParam param) {
 
-                        try {
-                            Object result = param.getResult();
-                            if (!(result instanceof Class<?>)) return;
+            Class<?> c = Class.forName(
+                    name,
+                    false,
+                    lp.classLoader
+            );
 
-                            Class<?> clazz = (Class<?>) result;
-                            String name = clazz.getName();
-                            String lower = name.toLowerCase();
+            int hooked = 0;
 
-                            boolean matched = false;
+            for (final Method m : c.getDeclaredMethods()) {
 
-                            for (String keyword : KEYWORDS) {
-                                if (lower.contains(keyword)) {
-                                    matched = true;
-                                    break;
-                                }
-                            }
+                String mn = m.getName().toLowerCase();
 
-                            if (matched && SEEN.add(name)) {
-                                XposedBridge.log(TAG
-                                    + "CLASS LOADED: " + name);
-                            }
+                boolean match =
+                        name.startsWith("com.miui.dock.sidebar.")
+                        || name.startsWith("com.miui.sidebar.");
 
-                        } catch (Throwable ignored) {
+                if (!match) {
+
+                    for (String w : METHOD_WORDS) {
+
+                        if (mn.contains(w)) {
+                            match = true;
+                            break;
                         }
                     }
                 }
-            );
 
-            XposedBridge.log(TAG + "CLASS LOADER TRACE ACTIVE");
+                if (!match) {
+                    continue;
+                }
 
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + "TRACE ERROR: " + t);
-        }
-    }
+                int modifiers = m.getModifiers();
 
-    private static void scanServices(
-            XC_LoadPackage.LoadPackageParam lp) {
+                if (Modifier.isAbstract(modifiers)
+                        || Modifier.isNative(modifiers)) {
+                    continue;
+                }
 
-        for (String name : SERVICE_CLASSES) {
-            try {
-                Class<?> clazz = Class.forName(
-                    name, false, lp.classLoader);
+                final String sig = describe(m);
 
-                XposedBridge.log(TAG + "FOUND SERVICE: " + name);
+                try {
 
-                Method[] methods = clazz.getDeclaredMethods();
+                    m.setAccessible(true);
 
-                XposedBridge.log(TAG + "METHOD COUNT: "
-                        + name + " = " + methods.length);
-
-                for (final Method method : methods) {
-                    String signature = describe(method);
-
-                    XposedBridge.log(TAG + "METHOD: " + signature);
-
-                    int mod = method.getModifiers();
-
-                    if (Modifier.isAbstract(mod)
-                            || Modifier.isNative(mod)) {
-                        continue;
-                    }
-
-                    try {
-                        method.setAccessible(true);
-
-                        XposedBridge.hookMethod(
-                            method,
+                    XposedBridge.hookMethod(
+                            m,
                             new XC_MethodHook() {
+
                                 @Override
                                 protected void beforeHookedMethod(
-                                        MethodHookParam param) {
+                                        MethodHookParam p) {
 
-                                    AtomicInteger count =
-                                        COUNTS.computeIfAbsent(
-                                            signature,
-                                            k -> new AtomicInteger());
+                                    AtomicInteger n =
+                                            COUNTS.computeIfAbsent(
+                                                    sig,
+                                                    k -> new AtomicInteger()
+                                            );
 
-                                    int n = count.incrementAndGet();
+                                    int count = n.incrementAndGet();
 
-                                    if (n <= 3) {
-                                        XposedBridge.log(TAG
-                                            + "SERVICE CALL #" + n
-                                            + ": " + signature);
+                                    if (count <= 8) {
+
+                                        XposedBridge.log(
+                                                TAG + "CALL #"
+                                                + count + " " + sig
+                                        );
                                     }
                                 }
                             }
-                        );
+                    );
 
-                        XposedBridge.log(TAG + "HOOK OK: "
-                                + signature);
+                    hooked++;
 
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + "HOOK FAILED: "
-                                + signature + " " + t);
-                    }
+                    XposedBridge.log(
+                            TAG + "HOOK OK " + sig
+                    );
+
+                } catch (Throwable t) {
+
+                    XposedBridge.log(
+                            TAG + "HOOK FAIL "
+                            + sig + " : " + t
+                    );
                 }
-
-            } catch (ClassNotFoundException e) {
-                XposedBridge.log(TAG + "SERVICE NOT FOUND: "
-                        + name);
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + "SCAN ERROR: "
-                        + name + " " + t);
             }
+
+            XposedBridge.log(
+                    TAG + "CLASS "
+                    + name
+                    + " METHODS_HOOKED="
+                    + hooked
+            );
+
+        } catch (Throwable t) {
+
+            XposedBridge.log(
+                    TAG + "CLASS LOAD FAIL "
+                    + name + " : " + t
+            );
         }
     }
 
     private static String describe(Method m) {
+
         StringBuilder s = new StringBuilder();
 
-        s.append(Modifier.toString(m.getModifiers()))
-         .append(" ")
-         .append(m.getReturnType().getName())
-         .append(" ")
-         .append(m.getDeclaringClass().getName())
-         .append("#")
+        s.append(m.getDeclaringClass().getName())
+         .append('#')
          .append(m.getName())
-         .append("(");
+         .append('(');
 
         Class<?>[] p = m.getParameterTypes();
 
         for (int i = 0; i < p.length; i++) {
-            if (i > 0) s.append(", ");
+
+            if (i > 0) {
+                s.append(',');
+            }
+
             s.append(p[i].getName());
         }
 
-        return s.append(")").toString();
+        return s.append(')').toString();
     }
 }
