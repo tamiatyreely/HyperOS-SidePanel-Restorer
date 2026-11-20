@@ -2,6 +2,7 @@
 package com.example.sidepanel;
 
 import dalvik.system.DexFile;
+
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Enumeration;
@@ -15,8 +16,11 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * HyperOS Native Sidebar Diagnostic
- * 仅用于诊断，不修改手势、不创建悬浮窗。
+ * HyperOS SidePanel Restorer
+ *
+ * Diagnostic-only version.
+ * Scans SecurityCenter DEX for sidebar-related classes
+ * and records method calls for further analysis.
  */
 public final class MainHook implements IXposedHookLoadPackage {
 
@@ -29,26 +33,26 @@ public final class MainHook implements IXposedHookLoadPackage {
             new ConcurrentHashMap<>();
 
     private static final String[] IMPORTANT_CLASSES = {
-        "com.miui.gamebooster.service.VideoToolBoxService",
-        "com.miui.gamebooster.service.GameBoosterService",
-        "com.miui.gamebooster.service.DockWindowManagerService",
-        "com.miui.gamebooster.service.DockWindowManagerService$SidebarOverlayBinder"
+            "com.miui.gamebooster.service.VideoToolBoxService",
+            "com.miui.gamebooster.service.GameBoosterService",
+            "com.miui.gamebooster.service.DockWindowManagerService",
+            "com.miui.gamebooster.service.DockWindowManagerService$SidebarOverlayBinder"
     };
 
     private static final String[] METHOD_WORDS = {
-        "sidebar",
-        "toolbox",
-        "slidebar",
-        "drag",
-        "region",
-        "dock",
-        "overlay",
-        "show",
-        "move",
-        "line",
-        "tips",
-        "invoke",
-        "gesture"
+            "sidebar",
+            "toolbox",
+            "slidebar",
+            "drag",
+            "region",
+            "dock",
+            "overlay",
+            "show",
+            "move",
+            "line",
+            "tips",
+            "invoke",
+            "gesture"
     };
 
     @Override
@@ -63,24 +67,29 @@ public final class MainHook implements IXposedHookLoadPackage {
                 TAG + "SECURITYCENTER START process=" + lp.processName
         );
 
-        // 检查重要服务类
         for (String name : IMPORTANT_CLASSES) {
             hookNamedClass(lp, name);
         }
 
-        // 扫描 APK 中的原生侧边栏类
         scanDexForSidebarClasses(lp);
     }
 
+    /**
+     * Scan the main SecurityCenter APK DEX.
+     *
+     * Fixed: DexFile is not AutoCloseable in this
+     * Android compilation environment.
+     */
     private static void scanDexForSidebarClasses(
             XC_LoadPackage.LoadPackageParam lp) {
 
         String apk = lp.appInfo.sourceDir;
+        DexFile dex = null;
 
-        try (DexFile dex = new DexFile(apk)) {
+        try {
+            dex = new DexFile(apk);
 
             Enumeration<String> entries = dex.entries();
-
             int matched = 0;
 
             while (entries.hasMoreElements()) {
@@ -105,9 +114,21 @@ public final class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(
                     TAG + "DEX SCAN FAILED: " + t
             );
+
+        } finally {
+
+            if (dex != null) {
+                try {
+                    dex.close();
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 
+    /**
+     * Load a class and hook relevant methods.
+     */
     private static void hookNamedClass(
             XC_LoadPackage.LoadPackageParam lp,
             String name) {
@@ -132,27 +153,23 @@ public final class MainHook implements IXposedHookLoadPackage {
 
                 boolean match =
                         name.startsWith("com.miui.dock.sidebar.")
-                        || name.startsWith("com.miui.sidebar.");
+                                || name.startsWith("com.miui.sidebar.");
 
                 if (!match) {
 
-                    for (String w : METHOD_WORDS) {
+                    for (String word : METHOD_WORDS) {
 
-                        if (mn.contains(w)) {
+                        if (mn.contains(word)) {
                             match = true;
                             break;
                         }
                     }
                 }
 
-                if (!match) {
-                    continue;
-                }
+                if (!match
+                        || Modifier.isAbstract(m.getModifiers())
+                        || Modifier.isNative(m.getModifiers())) {
 
-                int modifiers = m.getModifiers();
-
-                if (Modifier.isAbstract(modifiers)
-                        || Modifier.isNative(modifiers)) {
                     continue;
                 }
 
@@ -168,21 +185,23 @@ public final class MainHook implements IXposedHookLoadPackage {
 
                                 @Override
                                 protected void beforeHookedMethod(
-                                        MethodHookParam p) {
+                                        MethodHookParam param) {
 
-                                    AtomicInteger n =
+                                    AtomicInteger counter =
                                             COUNTS.computeIfAbsent(
                                                     sig,
                                                     k -> new AtomicInteger()
                                             );
 
-                                    int count = n.incrementAndGet();
+                                    int count = counter.incrementAndGet();
 
                                     if (count <= 8) {
 
                                         XposedBridge.log(
                                                 TAG + "CALL #"
-                                                + count + " " + sig
+                                                        + count
+                                                        + " "
+                                                        + sig
                                         );
                                     }
                                 }
@@ -199,47 +218,63 @@ public final class MainHook implements IXposedHookLoadPackage {
 
                     XposedBridge.log(
                             TAG + "HOOK FAIL "
-                            + sig + " : " + t
+                                    + sig
+                                    + " : "
+                                    + t
                     );
                 }
             }
 
             XposedBridge.log(
                     TAG + "CLASS "
-                    + name
-                    + " METHODS_HOOKED="
-                    + hooked
+                            + name
+                            + " METHODS_HOOKED="
+                            + hooked
             );
 
         } catch (Throwable t) {
 
             XposedBridge.log(
                     TAG + "CLASS LOAD FAIL "
-                    + name + " : " + t
+                            + name
+                            + " : "
+                            + t
             );
         }
     }
 
+    /**
+     * Build a readable method signature.
+     */
     private static String describe(Method m) {
 
         StringBuilder s = new StringBuilder();
 
-        s.append(m.getDeclaringClass().getName())
-         .append('#')
-         .append(m.getName())
-         .append('(');
+        s.append(
+                m.getDeclaringClass().getName()
+        );
 
-        Class<?>[] p = m.getParameterTypes();
+        s.append('#');
 
-        for (int i = 0; i < p.length; i++) {
+        s.append(m.getName());
+
+        s.append('(');
+
+        Class<?>[] params = m.getParameterTypes();
+
+        for (int i = 0; i < params.length; i++) {
 
             if (i > 0) {
                 s.append(',');
             }
 
-            s.append(p[i].getName());
+            s.append(
+                    params[i].getName()
+            );
         }
 
-        return s.append(')').toString();
+        s.append(')');
+
+        return s.toString();
     }
 }
